@@ -85,7 +85,13 @@ def call_gemini(api_key: str, prompt: str, model: str = "gemini-flash-lite-lates
                  max_retries: int = 3) -> str:
     import google.generativeai as genai
     genai.configure(api_key=api_key)
-    gen_model = genai.GenerativeModel(model)
+    gen_model = genai.GenerativeModel(
+        model,
+        generation_config={
+            "temperature": 0.8,
+            "max_output_tokens": 4096,  # generous ceiling so JSON never gets cut off mid-way
+        },
+    )
 
     last_error = None
     for attempt in range(max_retries):
@@ -94,9 +100,13 @@ def call_gemini(api_key: str, prompt: str, model: str = "gemini-flash-lite-lates
             return response.text
         except Exception as e:
             last_error = e
-            # If it's a rate-limit (429) error, wait and retry with backoff.
-            if "429" in str(e) or "quota" in str(e).lower():
+            # Rate-limit (429) or transient server (500) errors: wait and retry.
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower():
                 time.sleep(15 * (attempt + 1))
+                continue
+            if "500" in err_str or "internal" in err_str.lower():
+                time.sleep(5 * (attempt + 1))
                 continue
             raise
     raise last_error
@@ -116,24 +126,38 @@ def call_openai(api_key: str, prompt: str, model: str = "gpt-4o-mini") -> str:
 def generate_email_variants(provider: str, api_key: str, product_description: str,
                              target_audience: str, sender_name: str, sender_company: str,
                              prospect_details: dict, num_variants: int = 2,
-                             tone: str = "professional") -> list:
+                             tone: str = "professional", max_json_retries: int = 2) -> list:
     """
     Calls the selected LLM provider and returns a list of variant dicts:
     [{"label": ..., "angle": ..., "subject": ..., "body": ...}, ...]
+
+    If the model returns malformed/truncated JSON, retries the whole
+    generation a couple of times before giving up (occasional bad output
+    is normal for free-tier models and usually succeeds on retry).
     """
     prompt = build_prompt(product_description, target_audience, sender_name,
                            sender_company, prospect_details, num_variants, tone)
 
-    if provider == "gemini":
-        raw_text = call_gemini(api_key, prompt)
-    elif provider == "openai":
-        raw_text = call_openai(api_key, prompt)
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+    last_error = None
+    for attempt in range(max_json_retries + 1):
+        try:
+            if provider == "gemini":
+                raw_text = call_gemini(api_key, prompt)
+            elif provider == "openai":
+                raw_text = call_openai(api_key, prompt)
+            else:
+                raise ValueError(f"Unknown provider: {provider}")
 
-    data = _extract_json(raw_text)
-    variants = data.get("variants", [])
-    return [_normalize_variant(v) for v in variants]
+            data = _extract_json(raw_text)
+            variants = data.get("variants", [])
+            if not variants:
+                raise ValueError("Model returned no variants.")
+            return [_normalize_variant(v) for v in variants]
+        except (ValueError, KeyError) as e:
+            # JSON parsing / shape problems - worth retrying, might be transient.
+            last_error = e
+            continue
+    raise last_error
 
 
 def _normalize_variant(variant: dict) -> dict:
