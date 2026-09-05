@@ -47,10 +47,22 @@ provider = st.sidebar.selectbox(
     format_func=lambda x: "Google Gemini (free tier)" if x == "gemini" else "OpenAI (GPT)",
 )
 
+def _get_secret_key(name: str) -> str:
+    """Safely reads a key from Streamlit secrets if configured; returns '' if not set."""
+    try:
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
+
+
+secret_key_name = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
+default_key = _get_secret_key(secret_key_name)
+
 api_key = st.sidebar.text_input(
     f"{'Gemini' if provider == 'gemini' else 'OpenAI'} API Key",
+    value=default_key,
     type="password",
-    help="Your key is only used for this session and never stored.",
+    help="Auto-filled from Streamlit Secrets if configured. You can also paste your own here for this session only.",
 )
 
 num_variants = st.sidebar.slider("Number of A/B variants per prospect", min_value=2, max_value=3, value=2)
